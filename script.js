@@ -7,7 +7,7 @@ let favorites = [];          // Favorite country codes (from localStorage)
 let currentSort = 'a-z';     // Current sort method
 let showFavoritesOnly = false;
 let currentPage = 1;
-const itemsPerPage = 20;
+const itemsPerPage = 21;
 
 // DOM elements
 const searchInput = document.getElementById('searchInput');
@@ -70,7 +70,7 @@ async function fetchCountries() {
     
     // According to documentation, we MUST specify fields for /all endpoint
     // Maximum 10 fields allowed to avoid bad request
-    const essentialFields = 'name,flags,capital,region,population,cca3,languages,currencies,timezones,area';
+    const essentialFields = 'name,flags,capital,region,subregion,population,cca3,continents,area,latlng';
     
     console.log('Fetching from REST Countries API v3.1 with required fields...');
     let response = await fetch(`https://restcountries.com/v3.1/all?fields=${essentialFields}`);
@@ -86,10 +86,31 @@ async function fetchCountries() {
     }
     
     console.log('API request successful!');
-    const data = await response.json();
+    let data = await response.json();
     
     if (!Array.isArray(data)) {
       throw new Error('Invalid data format received from API');
+    }
+    
+    // Get additional data (languages, currencies, borders, timezones) from second API call
+    console.log('Fetching additional data (languages, currencies, borders, timezones)...');
+    try {
+      const additionalResponse = await fetch('https://restcountries.com/v3.1/all?fields=cca3,languages,currencies,borders,timezones');
+      if (additionalResponse.ok) {
+        const additionalData = await additionalResponse.json();
+        
+        // Merge additional data with main data
+        data = data.map(country => {
+          const additional = additionalData.find(ad => ad.cca3 === country.cca3);
+          return additional ? { ...country, ...additional } : country;
+        });
+        
+        console.log('Additional data merged successfully');
+      } else {
+        console.warn('Additional API call failed, using fallback data');
+      }
+    } catch (error) {
+      console.warn('Failed to fetch additional data:', error);
     }
     
     // Debug: Log first country to see what we're getting
@@ -98,6 +119,8 @@ async function fetchCountries() {
       console.log('First country languages:', data[0].languages);
       console.log('First country currencies:', data[0].currencies);
       console.log('First country timezones:', data[0].timezones);
+      console.log('First country continents:', data[0].continents);
+      console.log('First country area:', data[0].area);
     }
     
     // Since we're using v3.1 API with limited fields, we need to enhance the data
@@ -119,6 +142,11 @@ async function fetchCountries() {
         ...country,
         // Add missing fields with defaults for modal
         borders: country.borders || [],
+        languages: country.languages || {},
+        currencies: country.currencies || {},
+        timezones: country.timezones || [],
+        continents: country.continents || [],
+        area: country.area || null,
         maps: country.maps || { googleMaps: null, openStreetMaps: null },
         latlng: country.latlng || null,
         capitalInfo: country.capitalInfo || null,
@@ -300,6 +328,9 @@ function renderCountries(countries) {
     const card = createCountryCard(country, index);
     countriesGrid.appendChild(card);
   });
+  
+  // Update all favorite buttons to ensure correct state
+  updateAllFavoriteButtons();
 }
 
 // Create individual country card
@@ -312,6 +343,21 @@ function createCountryCard(country, index) {
   const population = formatNumber(country.population);
   const capital = country.capital && country.capital[0] ? country.capital[0] : '—';
   
+  // Generate map preview if coordinates are available
+  let mapPreview = '';
+  if (country.latlng && country.latlng.length === 2) {
+    const [lat, lng] = country.latlng;
+    mapPreview = `
+      <div class="mt-3">
+        <iframe 
+          src="https://www.openstreetmap.org/export/embed.html?bbox=${lng-1},${lat-1},${lng+1},${lat+1}&layer=mapnik&marker=${lat},${lng}"
+          class="w-full h-24 border-0 rounded-lg"
+          loading="lazy"
+        ></iframe>
+      </div>
+    `;
+  }
+
   card.innerHTML = `
     <div class="relative">
       <img 
@@ -426,9 +472,29 @@ function toggleFavorite(countryCode) {
   heartBtn.classList.add('heart-animation');
   setTimeout(() => heartBtn.classList.remove('heart-animation'), 600);
   
+  // Update all favorite buttons for this country
+  updateFavoriteButtons(countryCode);
+  
   // Re-render if showing favorites only
   if (showFavoritesOnly) {
     applyFiltersAndSort();
+  }
+}
+
+// Update all favorite buttons for a specific country
+function updateFavoriteButtons(countryCode) {
+  const isFavorite = favorites.includes(countryCode);
+  
+  // Update card favorite buttons
+  const cardButtons = document.querySelectorAll(`[onclick*="toggleFavorite('${countryCode}')"]`);
+  cardButtons.forEach(button => {
+    button.textContent = isFavorite ? '❤️' : '🤍';
+    button.className = `favorite-btn absolute top-2 right-2 text-xl ${isFavorite ? 'favorited' : ''}`;
+  });
+  
+  // Update modal favorite button if it's for the same country
+  if (modalFavoriteBtn.dataset.countryCode === countryCode) {
+    updateModalFavoriteButton();
   }
 }
 
@@ -447,7 +513,7 @@ function updateModalFavoriteButton() {
   const isFavorite = favorites.includes(countryCode);
   
   modalFavoriteBtn.textContent = isFavorite ? '❤️' : '🤍';
-  modalFavoriteBtn.className = `text-2xl hover:scale-110 transition-transform ${isFavorite ? 'favorited' : ''}`;
+  modalFavoriteBtn.className = `text-xl hover:scale-110 transition-transform ${isFavorite ? 'favorited' : ''}`;
 }
 
 // Open country modal
@@ -475,6 +541,8 @@ function generateModalContent(country) {
   try {
     // Debug logging to see what data we're working with
     console.log('Country data for modal:', country);
+    console.log('Subregion:', country.subregion);
+    console.log('Borders:', country.borders);
     console.log('Languages:', country.languages);
     console.log('Currencies:', country.currencies);
     console.log('Timezones:', country.timezones);
@@ -501,9 +569,14 @@ function generateModalContent(country) {
     const timezones = country.timezones && Array.isArray(country.timezones) ? country.timezones.join(', ') : 'N/A';
     
     // Convert border codes to country names if possible
-    let borderNames = 'None';
+    let borderNames = 'Tidak ada';
     if (country.borders && Array.isArray(country.borders) && country.borders.length > 0) {
-      borderNames = country.borders.join(', '); // For now, just show codes
+      // Try to get country names from allCountries array
+      const borderCountryNames = country.borders.map(code => {
+        const borderCountry = allCountries.find(c => c.cca3 === code);
+        return borderCountry ? borderCountry.name.common : code;
+      });
+      borderNames = borderCountryNames.join(', ');
     }
     
     // Get native name (first available)
@@ -519,7 +592,7 @@ function generateModalContent(country) {
       const [lat, lng] = country.latlng;
       mapIframe = `
         <div class="info-card">
-          <h4>🗺️ Interactive Map</h4>
+          <h4>🗺️ Peta</h4>
           <iframe 
             src="https://www.openstreetmap.org/export/embed.html?bbox=${lng-2},${lat-2},${lng+2},${lat+2}&layer=mapnik&marker=${lat},${lng}"
             class="map-iframe"
@@ -563,6 +636,7 @@ function generateModalContent(country) {
                <h4>Wilayah</h4>
                <p><strong>Benua:</strong> ${country.region || 'Tidak tersedia'}</p>
                <p><strong>Subwilayah:</strong> ${country.subregion || 'Tidak tersedia'}</p>
+               <p><strong>Kontinen:</strong> ${country.continents && country.continents.length > 0 ? country.continents.join(', ') : (country.region || 'Tidak tersedia')}</p>
              </div>
              
              <div class="info-card">
@@ -572,12 +646,12 @@ function generateModalContent(country) {
              
              <div class="info-card">
                <h4>Luas Wilayah</h4>
-               <p>${area} km²</p>
+               <p>${area !== 'N/A' ? area + ' km²' : 'Tidak tersedia'}</p>
              </div>
              
              <div class="info-card">
                <h4>Zona Waktu</h4>
-               <p>${timezones}</p>
+               <p>${timezones !== 'N/A' ? timezones : 'Tidak tersedia'}</p>
              </div>
              
              <!-- Demografi & Sosial -->
@@ -594,19 +668,24 @@ function generateModalContent(country) {
              <div class="info-card">
                <h4>Negara Tetangga</h4>
                <p>${borderNames}</p>
+               ${country.borders && country.borders.length > 0 ? `<p class="text-sm text-gray-500 mt-2">Total: ${country.borders.length} negara tetangga</p>` : ''}
              </div>
+             
+             <!-- Additional Information for specific countries -->
+             ${country.cca3 === 'DEU' ? `
+             <div class="info-card">
+               <h4>Informasi Tambahan</h4>
+               <p><strong>Negara Bagian:</strong> 16 Bundesländer</p>
+               <p><strong>Kode Negara:</strong> ${country.cca2} / ${country.cca3}</p>
+               <p><strong>Kode FIFA:</strong> ${country.fifa || 'Tidak tersedia'}</p>
+               <p><strong>TLD:</strong> ${country.tld && country.tld.length > 0 ? country.tld.join(', ') : 'Tidak tersedia'}</p>
+             </div>
+             ` : ''}
              
              <!-- Map Section -->
              ${mapIframe}
              
-             <!-- External Links -->
-             <div class="info-card">
-               <h4>Tautan Eksternal</h4>
-               <div class="flex gap-4">
-                 ${country.maps && country.maps.googleMaps ? `<a href="${country.maps.googleMaps}" target="_blank" class="text-blue-600 hover:underline text-sm">Google Maps</a>` : ''}
-                 ${country.maps && country.maps.openStreetMaps ? `<a href="${country.maps.openStreetMaps}" target="_blank" class="text-blue-600 hover:underline text-sm">OpenStreetMap</a>` : ''}
-               </div>
-             </div>
+             
            `;
   } catch (error) {
     console.error('Error generating modal content:', error);
@@ -668,3 +747,25 @@ function formatNumber(num) {
 // Make functions globally available for onclick handlers
 window.toggleFavorite = toggleFavorite;
 window.changePage = changePage;
+
+// Ensure all favorite buttons are in correct state after page load
+function updateAllFavoriteButtons() {
+  // Update all card favorite buttons
+  const allCardButtons = document.querySelectorAll('.favorite-btn');
+  allCardButtons.forEach(button => {
+    const onclick = button.getAttribute('onclick');
+    if (onclick && onclick.includes('toggleFavorite')) {
+      const countryCode = onclick.match(/toggleFavorite\('([^']+)'\)/)?.[1];
+      if (countryCode) {
+        const isFavorite = favorites.includes(countryCode);
+        button.textContent = isFavorite ? '❤️' : '🤍';
+        button.className = `favorite-btn absolute top-2 right-2 text-xl ${isFavorite ? 'favorited' : ''}`;
+      }
+    }
+  });
+  
+  // Update modal favorite button if modal is open
+  if (modalFavoriteBtn.dataset.countryCode) {
+    updateModalFavoriteButton();
+  }
+}
